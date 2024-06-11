@@ -1,0 +1,172 @@
+---
+title: "Proportional colocalisation"
+author: "Chris Wallace"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Proportional colocalisation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+Colocalisation is the occurence of two traits sharing a causal variant in a given genetic region. One popular method for inferring whether two traits have a colocalising signal is "coloc"^[Giambartolomei, C. et al. Bayesian Test for Colocalisation between Pairs of Genetic Association Studies Using Summary Statistics. PLOS Genet. 10, e1004383 (2014).].  This is based on fine mapping the summary statistics for two traits, and performing some joint analysis. However, fine mapping can be inaccurate when information varies between SNPs (eg due to varying sample size), particularly in large samples^[Kanai, M. et al. Meta-analysis fine-mapping is often miscalibrated at single-variant resolution. Cell Genomics 2, 100210 (2022).], and this inaccuracy can propogate to coloc.
+
+This motivated us to revisit an older method of testing colocalisation, based on testing proportionality of regression coefficients between two traits^[Plagnol, V., Smyth, D. J., Todd, J. A. & Clayton, D. G. Statistical independence of the colocalized association signals for type 1 diabetes and RPS26 gene expression on chromosome 12q13. Biostatistics 10, 327–334 (2009).] which was later evaluated in more detail^[Wallace, C. Statistical Testing of Shared Genetic Control for Potentially Related Traits. Genet. Epidemiol. 37, 802–813 (2013).]. There were a number of issues with this approach which motivated the development of coloc:
+
+1. it tests the null hypothesis that coefficients are proportional, and thus is difficult to interpret because failure to reject can either correspond to colocalisation, or lack of power
+
+2. the test is based on the coefficients from a joint multi-SNP model, which can be hard to reconstruct accurately from the marginal test statistics typically available
+
+3. the degrees of freedom of the test is n-1, where n is the number of SNPs, which can lead to lack of power
+
+Here we solve those issues by
+
+1. only advising to conduct the test when standard evidence points to convincing association with both traits (eg minimum p values \(< 10^{-8}\))
+
+2. using marginal coefficients directly, with the LD between the variants used to infer the covariance of those test statistics
+
+3. performing many tests of pairs of variants rather than one test of n variants, and using false discovery rates to infer whether any of those tests were true rejections of the null of colocalisation
+
+This vignette demonstrates the basic use of this test with some example data. We assume a very large sample size, so that p values at the most strongly associated SNPs are of the order \(10^{-300}\). We use very small standard errors, so that odds ratios at the most associated SNPs are of the order of 3.
+
+## Create some example data
+```{r,fig.width=6,fig.height=6}
+## some unnassociated snps
+set.seed(42)
+nsnps=100
+z1=rnorm(nsnps)
+z2=rnorm(nsnps)
+## spike in some strong effects
+spikes=42:43
+z1[spikes] = z1[spikes] + 35
+z2[spikes] = z2[spikes] + 35
+## add weaker effects at other snps
+z1[-spikes] = z1[-spikes] + 
+  rnorm(nsnps,
+        mean=pmax(30-abs(1:nsnps-mean(spikes)),0),sd=1)[-spikes]
+z2[-spikes] = z2[-spikes] + 
+  rnorm(nsnps,
+        mean=pmax(30-abs(1:nsnps-mean(spikes)),0),sd=1)[-spikes]
+s1=s2=rep(sqrt(0.001),nsnps)
+beta1=z1 * s1
+beta2=z2 * s2
+summary(exp(beta1))
+summary(exp(beta2))
+
+library(coloc)
+D1=list(beta=beta1,varbeta=s1^2,type="cc",snp=paste0("v",1:100),position=1:100)
+D2=list(beta=beta2,varbeta=s2^2,type="cc",snp=paste0("v",1:100),position=1:100)
+oldpar=par(mfrow=c(2,1))
+plot_dataset(D1); title(main="trait 1"); 
+abline(v=spikes[2])
+plot_dataset(D2); title(main="trait 2"); 
+abline(v=spikes[2])
+par(oldpar)
+```
+
+These two traits have data for 100 SNPs, 98 of them unassociated, and two with strong p values (the same two across the two traits). Looking at the plots makes us expect colocalisation, and indeed this is what we see in a coloc analysis
+```{r}
+  coloc.abf(D1,D2)
+```
+  
+Now mess with the standard errors of the two lead snps, differently for each trait. We know that the standard error of a regression coefficient is proportional to \(1/\sqrt{N}\) where \(N\)  is the sample size.  Suppose about 8% of samples are missing data for one or other SNP in the two traits. This is not impossible in meta analyses which include older datasets using different chips, and missing data is just one source of variable information across SNPs. 
+
+```{r,fig.width=6,fig.height=6}
+variable_information=1/(sqrt(0.92))
+variable_information
+s1[spikes]=s1[spikes] * (c(1,variable_information))
+  s2[spikes]=s2[spikes] * (c(variable_information,1))
+A1=list(beta=beta1,varbeta=s1^2,type="cc",snp=paste0("v",1:100),position=1:100)
+A2=list(beta=beta2,varbeta=s2^2,type="cc",snp=paste0("v",1:100),position=1:100)
+
+oldpar <- par(mfrow = c(1,2))
+plot_dataset(A1); title(main="trait 1, modified"); 
+abline(v=spikes[2])
+plot_dataset(A2); title(main="trait 2"); 
+abline(v=spikes[2])
+par(oldpar)
+```
+
+The effect of this appears quite small on the log p value scale, but dramatic on the colocalisation
+```{r}
+coloc.abf(A1,A2)
+```
+
+The reason for this is that the fine mapping posterior probabilities are greatly affected by the change of p values. The top plots show the fine mapping results of the original data, and the bottom of the modified data, and we see in all cases the posterior probabilities suggest a single causal variant in any credible set, but that the identity of that variant switches between original and modified data for trait 1.
+```{r,fig.width=6,fig.height=6}
+oldpar=par(mfrow=c(2,1))
+plot(1:nsnps, finemap.abf(D1)$SNP.PP[1:nsnps], 
+     xlab="Position",ylab="Posterior prob")
+title(main="trait 1, original"); abline(v=spikes[2])
+plot(1:nsnps, finemap.abf(D2)$SNP.PP[1:nsnps], 
+     xlab="Position",ylab="Posterior prob")
+title(main="trait 2, original"); abline(v=spikes[2])
+par(mfrow=c(2,1))
+plot(1:nsnps, finemap.abf(A1)$SNP.PP[1:nsnps], 
+     xlab="Position",ylab="Posterior prob")
+title(main="trait 1, modified"); abline(v=spikes[2])
+plot(1:nsnps, finemap.abf(A2)$SNP.PP[1:nsnps], 
+     xlab="Position",ylab="Posterior prob")
+title(main="trait 2, modified"); abline(v=spikes[2])
+par(oldpar)
+```
+
+
+## Analysis with proportional coloc
+Now we analyse both pairs of datasets with the proportional colocalisation test. The proportional colocalisation test is in fact a set of tests, of all possible pairs of SNPs in a region.  If there are more than `maxtests` pairs (default 10000), a subset will be tested, with a focus on those with the smallest marginal p values. To get a find test statistic, we ask whether any of the tests are significant at some false discovery rate (eg fdr < 0.05), correcting for the number of tests we might have done, not just the tests we did. This allows the selection of the subset of most significant test pairs, which is important because it is in these pairs we have the power to reject the null hypothesis of proportional colocalisation. If we fail to reject the null in a case where fine-mapping based coloc is giving a strong posterior for H3, this should lead us to question the validity of the H3 conclusion. Perhaps it relates to a case of varible information between SNPs in the context of a large sample size.
+
+Here, when we run the proportional test on the original data, we do indeed fail to reject the null hypothesis of proportional colocalisation:
+```{r}
+library(colocPropTest)
+LD=diag(nsnps); dimnames(LD)=list(D1$snp,D1$snp)
+result=run_proptests(D1,D2,LD=LD)
+min(result$fdr)
+```
+and in contrast to fine-mapping based coloc, we also fail to reject the proportional colocalisation hypothesis in the modified data. This is because the information available at each SNP is explicitly used in the proportional test.
+```{r}
+resultA=run_proptests(A1,A2,LD=LD)
+min(resultA$fdr)
+```
+
+Note we had to provide an LD matrix. As with the coloc package, this should have as column and rownames the snp identifiers provided in the coloc-style datasets.
+
+## Differences between fine-mapping and proportional coloc
+
+| | Fine-mapping | Proportional |
+|---|--|--|
+| Null hypothesis | no association | proportional colocalisation |
+| minimal summary statistics | p value, MAF or effects and standard errors | effects and standard errors |
+| effect of variable information | ignored | captured through standard errors |
+| LD | not required for single causal variant | required |
+| | required, but can differ between datasets for multiple causal variants | datasets must be sampled from the same population|
+
+### Low power
+Note that in situations of low power for one or both traits, both tests will tend to favour their null hypotheses. In the case of coloc, this means posterior support will concentrate on hypotheses with no association or association with only one trait.  In the case of proportional colocalisation, this is the colocalisation hypothesis itself (because the null includes colocalisation with a proportionality coefficient of 0).  For this reason it is very important to only apply proportional colocalisation where you are confident of detectable colocalisation in both datasets, ideally where fine-mapping coloc has put the posterior support on H3 and/or H4.
+
+### LD
+For fine-mapping coloc, each dataset may have its own LD matrix, and the test is still valid if they differ. For proportional testing, although mathematically each dataset may have its own LD matrix, we could get false rejections of the null hypothesis if the LD matrices differ much.  To understand this, imagine a case where the causal SNP is in high LD with a neighbour in one dataset, and not in LD with this same neighbour in another.  The proportional test essentially asks whether a straight line can be drawn through the effects of both SNPs and the origin. If the LD is radically different, as here, this will not be possible (eg in example below). This also suggests that if the LD is subtly different, but the confidence intervals are tight, it will again not be possible. Thus we could have false rejection of the proportional colocalisation hypothesis when LD differs between studies. Thus we recommend only using proportional colocalisation where the two studies are from the same population with the same LD structure. 
+
+```{r,fig.width=6,fig.height=6}
+beta1=c(1,.9)
+vbeta1=matrix(c(.1,.09,.09,.1),2,2)
+beta2=c(1,0)
+vbeta2=matrix(c(.1,0,0,.1),2,2)
+library(plotrix)
+plot(beta1, beta2, xlim=c(-.1,1.1), ylim=c(-.1,1.1),
+     xlab=c("study 1"), ylab=c("study 2"),asp=1)
+abline(0,1,lty=2)
+points(0,0,pch="x"); 
+text(c(beta1,0)-.05, c(beta2,0), c("snp 1","snp 2","origin"), adj=c(1,0.5))
+draw.circle(beta1[1],beta2[1],.196)
+draw.circle(beta1[2],beta2[2],.196); 
+title(main="Effect sizes and confidence intervals")
+```
+
+
